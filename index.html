@@ -4,6 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>nanorails — a self-driving dual-PPU NES train</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>🚂</text></svg>">
+<meta name="description" content="A self-driving dual-PPU NES train sim, playable in your browser.">
+<meta property="og:title" content="nanorails 🚂">
+<meta property="og:description" content="A tiny self-driving train on a dual-PPU NES — playable in your browser.">
+<meta name="theme-color" content="#10131a">
+<meta name="color-scheme" content="dark">
 <style>
   :root { --bg:#10131a; --fg:#e8ecf3; --dim:#8b93a7; --accent:#6fe3a0; }
   * { box-sizing: border-box; }
@@ -77,16 +83,39 @@
   addEventListener('keydown', e => { if (map[e.code] !== undefined) { machine.setButton(map[e.code], true); e.preventDefault(); } });
   addEventListener('keyup',   e => { if (map[e.code] !== undefined) { machine.setButton(map[e.code], false); e.preventDefault(); } });
 
-  function frame() {
+  // --- emulation locked to 60.0988 Hz regardless of the display refresh rate ---
+  const FRAME_MS = 1000 / 60.0988;
+  let last = 0, acc = 0;
+  function frame(now) {
     if (!running) return;
-    machine.runFrame();
-    img.data.set(machine.out);
-    ctx.putImageData(img, 0, 0);
+    if (!last) last = now;
+    acc += now - last; last = now;
+    if (acc > 100) acc = 100;             // don't spiral after a tab stall
+    let ran = 0;
+    while (acc >= FRAME_MS && ran < 3) { machine.runFrame(); acc -= FRAME_MS; ran++; }
+    if (ran) { img.data.set(machine.out); ctx.putImageData(img, 0, 0); }
     requestAnimationFrame(frame);
   }
+
+  // --- audio: emulate the APU into a WebAudio node (created on user gesture) ---
+  function startAudio() {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      const actx = new AC();
+      machine.apu.sampleRate = actx.sampleRate;
+      const node = actx.createScriptProcessor(1024, 0, 1);
+      node.onaudioprocess = e => machine.apu.render(e.outputBuffer.getChannelData(0));
+      node.connect(actx.destination);
+      if (actx.state === 'suspended') actx.resume();
+    } catch (e) { /* audio optional */ }
+  }
+
   function start() {
     if (running) return;
     running = true; startEl.style.display = 'none';
+    startAudio();
+    last = 0; acc = 0;
     requestAnimationFrame(frame);
   }
   startEl.addEventListener('click', start);

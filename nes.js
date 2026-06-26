@@ -180,6 +180,70 @@ class PPU {
 }
 
 // =============================================================================
+// APU — pulse1, pulse2, noise (what nanorails' SFX use). Synthesised on demand
+// from live register state; the ROM manages envelopes each frame.
+// =============================================================================
+const CPU_HZ = 1789773;
+const NOISE_PERIODS = [4,8,16,32,64,96,128,160,202,254,380,508,762,1016,2034,4068];
+const DUTY = [0.125, 0.25, 0.5, 0.75];
+
+class APU {
+  constructor() {
+    this.reg = new Uint8Array(0x18);
+    this.enable = 0;
+    this.sampleRate = 44100;
+    this.p1ph = 0; this.p2ph = 0;
+    this.lfsr = 1; this.nAcc = 0;
+  }
+  write(a, v) {
+    a &= 0x1F;
+    this.reg[a] = v;
+    if (a === 0x15) this.enable = v;
+  }
+  pulse(i, ph) {
+    const o = i * 4;
+    const r0 = this.reg[o], r2 = this.reg[o + 2], r3 = this.reg[o + 3];
+    if (!(this.enable & (1 << i))) return 0;
+    const period = r2 | ((r3 & 7) << 8);
+    if (period < 8) return 0;
+    const vol = (r0 & 0x10) ? (r0 & 0x0F) : (r0 & 0x0F); // ROM uses constant volume
+    if (!vol) return 0;
+    const duty = DUTY[(r0 >> 6) & 3];
+    return ((ph % 1) < duty ? 1 : -1) * (vol / 15);
+  }
+  freq(i) {
+    const o = i * 4;
+    const period = this.reg[o + 2] | ((this.reg[o + 3] & 7) << 8);
+    return CPU_HZ / (16 * (period + 1));
+  }
+  render(buf) {
+    const n = buf.length, sr = this.sampleRate;
+    const f1 = this.freq(0) / sr, f2 = this.freq(1) / sr;
+    const nEnable = this.enable & 8;
+    const nVol = (this.reg[0x0C] & 0x0F) / 15;
+    const nPeriod = NOISE_PERIODS[this.reg[0x0E] & 0x0F];
+    const nStep = CPU_HZ / nPeriod / sr;     // LFSR shifts per output sample
+    for (let s = 0; s < n; s++) {
+      let v = 0;
+      v += this.pulse(0, this.p1ph) * 0.16;
+      v += this.pulse(1, this.p2ph) * 0.16;
+      if (nEnable && nVol) {
+        this.nAcc += nStep;
+        while (this.nAcc >= 1) {
+          this.nAcc -= 1;
+          const fb = (this.lfsr ^ (this.lfsr >> 1)) & 1;
+          this.lfsr = (this.lfsr >> 1) | (fb << 14);
+        }
+        v += ((this.lfsr & 1) ? 1 : -1) * nVol * 0.12;
+      }
+      this.p1ph += f1; if (this.p1ph > 1e6) this.p1ph = 0;
+      this.p2ph += f2; if (this.p2ph > 1e6) this.p2ph = 0;
+      buf[s] = v > 1 ? 1 : v < -1 ? -1 : v;
+    }
+  }
+}
+
+// =============================================================================
 // NES machine: CPU + bus + 2 PPUs
 // =============================================================================
 class NES {
@@ -189,6 +253,7 @@ class NES {
     this.ppu1 = new PPU(this.chrRom, false);             // front, CHR-ROM
     this.ppu2 = new PPU(new Uint8Array(0x2000), true);   // back, CHR-RAM
     this.pad = 0; this.padShift = 0; this.strobe = 0;
+    this.apu = new APU();
     this.out = new Uint8ClampedArray(256 * 240 * 4);
     this.initCPU();
   }
@@ -235,7 +300,9 @@ class NES {
       if (this.strobe) this.padShift = this.pad;
       return;
     }
-    // APU ($4000-4013,4015,4017): ignored (no audio in this build)
+    if ((a >= 0x4000 && a <= 0x4013) || a === 0x4015 || a === 0x4017) {
+      this.apu.write(a, v);
+    }
   }
 
   // ---- 6502 ----
