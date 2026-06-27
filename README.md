@@ -5,9 +5,6 @@ A self-driving "tiny train sim" — *Tiny Rails, but tinier* — for the **Advan
 
 ![nanorails](img/nanorails.png)
 
-**▶ [Play it in your browser](https://groblegark.github.io/nanorails/)** — runs on a dual-PPU NES emulator written from scratch in JavaScript.
-
-
 A cute steam locomotive rides itself through a parallax town, pulling into stations,
 picking up and dropping coaches, puffing smoke, and blowing its whistle — all on its
 own, forever. No input required; it's a toy that plays itself (controls optional).

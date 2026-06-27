@@ -18,10 +18,14 @@ CHIM_X = BASE_X + Gen::CHIMNEY_DX
 CHIM_Y = BASE_Y + Gen::CHIMNEY_DY
 
 ; ---- OAM slot allocation ----------------------------------------------------
-; The train is split across BOTH PPUs to beat the 8-sprites-per-scanline limit:
-; the first PPU1_CARS coaches ride PPU1 (front, with the loco); the rest ride
-; PPU2 (back) which has its own independent 8-per-scanline budget.
-PPU1_CARS  = 2                                  ; coaches on PPU1 (front)
+; ALL coaches ride PPU1 (front) so they never duck behind the near-town. To
+; beat the 8-sprites-per-scanline limit on the crowded loco Y band, the coach
+; metasprites are sprite-MULTIPLEXED: the loco body + wheels + gauge + smoke
+; stay at fixed low OAM slots (never flicker), and the N coaches are laid into
+; the coach slot block in an order ROTATED by the frame counter. The PPU's
+; "first 8 by OAM index" rule then drops a DIFFERENT coach each frame, so all
+; coaches shimmer evenly instead of the rear ones vanishing permanently.
+PPU1_CARS  = Gen::MAX_CARS                       ; ALL coaches on PPU1 (front)
 WHEEL_BASE = Gen::TRAIN_BODY_COUNT
 CAR_BASE   = WHEEL_BASE + Gen::WHEEL_COUNT       ; PPU1 coaches: PPU1_CARS * 4
 SMOKE_BASE = CAR_BASE + PPU1_CARS * 4
@@ -39,7 +43,7 @@ ACCEL      = 1
 DECEL      = 2
 BRAKE_HARD = 3
 MIN_CREEP  = 8
-DWELL_TIME = 240         ; ~4s at the platform
+DWELL_TIME = 240        ; ~4s at the platform
 ; trip = 85 * 256 px ~= 2 minutes of cruising. odd multiple -> alternate depots.
 TRIP_HI    = 85
 CHUFF_GAP  = 12
@@ -77,7 +81,10 @@ carX:     .res 1
 zbTmp2:   .res 1
 capL:     .res 1
 capH:     .res 1
-cptr:     .res 2     ; dest pointer for a coach metasprite (PPU1 or PPU2 OAM)
+arrivals: .res 1     ; count of station arrivals (exported to $0705)
+zMod:     .res 1     ; per-frame coach rotation offset (multiplexing)
+zCoach:   .res 1     ; logical coach index during slot fill
+cptr:     .res 2     ; dest pointer for a coach metasprite (PPU1 OAM)
 
 .segment "RODATA"
 ; day -> noon -> sunset -> dusk -> night -> deep -> dawn -> morning
@@ -108,6 +115,7 @@ clr:
     sta todcL
     sta todcH
     sta carCount
+    sta arrivals
     lda #1
     sta carDir
     sta accelCtr
@@ -134,8 +142,7 @@ do_run:
 after:
     jsr apply_scroll
     jsr draw_all
-    ; the compact loco uses <=4 sprites/scanline, so up to 2 coupled coaches
-    ; (4 more) stay within the 8-sprites-per-scanline limit: no flicker.
+    jsr export_state         ; publish live state to $0700-$0705 for the host
     jsr Sfx::sfx_update
     rts
 .endproc
@@ -206,7 +213,12 @@ ramped:
     sta capL
     lda togoH
     sta capH
-    ldx carCount
+    lda carCount             ; brake-distance mass effect, shift capped at 2
+    cmp #3
+    bcc shift_ok
+    lda #2
+shift_ok:
+    tax
     beq capdone
 capsh:
     lsr capH
@@ -225,11 +237,12 @@ have_cap:
     bcs no_cap
     sta spd
 no_cap:
-    lda togoH
-    bne creep_done
+    ; guarantee progress: while any distance remains, hold at least a creep
+    ; speed so the final pixels always complete (else a loaded train freezes
+    ; one pixel short of the platform forever).
     lda togoL
-    cmp #8
-    bcc creep_done
+    ora togoH
+    beq creep_done           ; arrived
     lda spd
     cmp #MIN_CREEP
     bcs creep_done
@@ -282,6 +295,7 @@ no_hiss:
     sta mode
     lda #DWELL_TIME
     sta dwell
+    inc arrivals            ; arrived at a station
     jsr Sfx::sfx_bell       ; ding at the station
 
     ; couple/uncouple one car: ramp 0..MAX..0 so each leg has a different mass.
@@ -418,10 +432,43 @@ no_bob:
     jsr install_smoke
     jsr install_meter
     jsr install_pax
+    jsr export_state
+    rts
+.endproc
+
+; ----------------------------------------------------------------------------
+; State export: copy game state to fixed RAM so a host can read it each frame.
+;   $0700 = mode (0=dwell, 1=run)
+;   $0701 = carCount
+;   $0702 = odoL   $0703 = odoH   (16-bit odometer)
+;   $0704 = spd
+;   $0705 = arrivals (incremented once per station arrival)
+.proc export_state
+    lda mode
+    sta $0700
+    lda carCount
+    sta $0701
+    lda odoL
+    sta $0702
+    lda odoH
+    sta $0703
+    lda spd
+    sta $0704
+    lda arrivals
+    sta $0705
     rts
 .endproc
 
 ; coupled passenger coaches trailing behind the locomotive.
+;
+; All coaches live in the PPU1 coach slot block (CAR_BASE..CAR_BASE+MAX_CARS).
+; To beat the 8-sprites-per-scanline limit we MULTIPLEX: each frame we rotate
+; which slot each logical coach occupies, so the PPU's "first 8 by OAM index"
+; rule drops a different coach every frame -> even, gentle flicker.
+;
+; For slot s (0..carCount-1) we draw logical coach i = (s + frame) % carCount,
+; where each logical coach i has its own X position in the train. Coaches with
+; index >= carCount (and the PPU2 buffer) are parked off-screen.
 .proc install_cars
     ; coach rows share the loco's Y band
     clc
@@ -432,14 +479,9 @@ no_bob:
     adc #8
     sta zbTmp2               ; coach bottom Y
 
-    lda #(BASE_X - 4 - Gen::CAR_W)
-    sta carX
-    ldx #0                   ; coach index
-cloop:
-    ; choose dest OAM (PPU1 for the first PPU1_CARS, PPU2 for the rest)
-    cpx #PPU1_CARS
-    bcs use_ppu2
-    ; cptr = OAM + CAR_BASE*4 + x*16
+    ; park every coach slot first; then fill the active ones.
+    ldx #0
+park_loop:
     txa
     asl
     asl
@@ -449,13 +491,17 @@ cloop:
     adc #<(OAM + CAR_BASE * 4)
     sta cptr
     lda #>(OAM + CAR_BASE * 4)
+    adc #0
     sta cptr+1
-    jmp have_dest
-use_ppu2:
-    ; cptr = OAM2 + (x - PPU1_CARS)*16
+    jsr park_coach
+    inx
+    cpx #Gen::MAX_CARS
+    bne park_loop
+
+    ; also keep the (now unused) PPU2 coach buffer parked off-screen.
+    ldx #0
+park2_loop:
     txa
-    sec
-    sbc #PPU1_CARS
     asl
     asl
     asl
@@ -464,23 +510,69 @@ use_ppu2:
     adc #<OAM2
     sta cptr
     lda #>OAM2
+    adc #0
     sta cptr+1
-have_dest:
-    cpx carCount
-    bcc draw_coach
     jsr park_coach
-    jmp cnext
-draw_coach:
-    jsr put_coach
-cnext:
-    lda carX
+    inx
+    cpx #2                   ; PPU2 shadow holds only 8 sprites (2 coach units)
+    bne park2_loop
+
+    lda carCount
+    beq carsdone             ; no coaches -> nothing to draw
+
+    ; frameMod = frame % carCount  (carCount <= 5, so subtract in a loop)
+    lda Nmi::rzbNmiCount
+fmod:
+    cmp carCount
+    bcc fmod_done
+    sec
+    sbc carCount
+    jmp fmod
+fmod_done:
+    sta zMod                 ; per-frame rotation offset = frame % carCount
+    ldx #0                   ; slot index s
+sloop:
+    ; logical coach i = (s + frameMod) % carCount
+    txa
+    clc
+    adc zMod
+    cmp carCount
+    bcc no_wrap
+    sec
+    sbc carCount
+no_wrap:
+    sta zCoach               ; logical coach index i
+
+    ; carX = (BASE_X - 4 - CAR_W) - i*CAR_W
+    lda #(BASE_X - 4 - Gen::CAR_W)
+    ldy zCoach
+    beq haveX
+xsub:
     sec
     sbc #Gen::CAR_W
+    dey
+    bne xsub
+haveX:
     sta carX
+
+    ; cptr = OAM + CAR_BASE*4 + s*16
+    txa
+    asl
+    asl
+    asl
+    asl
+    clc
+    adc #<(OAM + CAR_BASE * 4)
+    sta cptr
+    lda #>(OAM + CAR_BASE * 4)
+    adc #0
+    sta cptr+1
+
+    jsr put_coach
+
     inx
-    cpx #Gen::MAX_CARS
-    beq carsdone
-    jmp cloop
+    cpx carCount
+    bne sloop
 carsdone:
     rts
 .endproc

@@ -187,12 +187,32 @@ const CPU_HZ = 1789773;
 const NOISE_PERIODS = [4,8,16,32,64,96,128,160,202,254,380,508,762,1016,2034,4068];
 const DUTY = [0.125, 0.25, 0.5, 0.75];
 
+// Mix levels. Channels are summed then scaled by MASTER. The per-channel gains
+// are chosen so the worst-case sum (all channels at full tilt) lands well under
+// 1.0 after MASTER, so the soft-clip at the end of render() effectively never
+// engages on normal SFX while individual channels stay clearly audible.
+const MASTER  = 0.85;
+const MIX_P1  = 0.34;   // departure whistle / generic pulse tone
+const MIX_P2  = 0.34;   // whistle 2nd voice / arrival bell
+const MIX_TRI = 0.42;   // triangle — softer waveform, can carry a bit more gain
+const MIX_NSE = 0.16;   // noise: steam chuff / brake hiss — kept airy, not harsh
+// 32-step triangle wave: 15..0 ramp down, 0..15 ramp up, normalised to [-1,1].
+const TRI_SEQ = (() => {
+  const t = new Float32Array(32);
+  for (let i = 0; i < 32; i++) {
+    const v = i < 16 ? 15 - i : i - 16;   // 15..0,0..15
+    t[i] = (v - 7.5) / 7.5;
+  }
+  return t;
+})();
+
 class APU {
   constructor() {
     this.reg = new Uint8Array(0x18);
     this.enable = 0;
     this.sampleRate = 44100;
     this.p1ph = 0; this.p2ph = 0;
+    this.triPh = 0;
     this.lfsr = 1; this.nAcc = 0;
   }
   write(a, v) {
@@ -206,9 +226,11 @@ class APU {
     if (!(this.enable & (1 << i))) return 0;
     const period = r2 | ((r3 & 7) << 8);
     if (period < 8) return 0;
-    const vol = (r0 & 0x10) ? (r0 & 0x0F) : (r0 & 0x0F); // ROM uses constant volume
+    const vol = (r0 & 0x0F); // ROM uses constant volume
     if (!vol) return 0;
     const duty = DUTY[(r0 >> 6) & 3];
+    // phase accumulates freely; (ph % 1) keeps it continuous so freq/vol
+    // changes between render calls don't reset phase (no pop).
     return ((ph % 1) < duty ? 1 : -1) * (vol / 15);
   }
   freq(i) {
@@ -216,28 +238,53 @@ class APU {
     const period = this.reg[o + 2] | ((this.reg[o + 3] & 7) << 8);
     return CPU_HZ / (16 * (period + 1));
   }
+  triFreq() {
+    const period = this.reg[0x0A] | ((this.reg[0x0B] & 7) << 8);
+    return CPU_HZ / (32 * (period + 1));
+  }
   render(buf) {
     const n = buf.length, sr = this.sampleRate;
     const f1 = this.freq(0) / sr, f2 = this.freq(1) / sr;
+
+    // ---- triangle ($4008-$400B): gate on $4015 bit 2 + nonzero period ----
+    const triPeriod = this.reg[0x0A] | ((this.reg[0x0B] & 7) << 8);
+    const triOn = (this.enable & 4) && triPeriod > 0;
+    const fT = triOn ? this.triFreq() / sr : 0;
+
+    // ---- noise ($400C-$400F) ----
     const nEnable = this.enable & 8;
     const nVol = (this.reg[0x0C] & 0x0F) / 15;
     const nPeriod = NOISE_PERIODS[this.reg[0x0E] & 0x0F];
     const nStep = CPU_HZ / nPeriod / sr;     // LFSR shifts per output sample
+    const noiseOn = nEnable && nVol;
+
     for (let s = 0; s < n; s++) {
       let v = 0;
-      v += this.pulse(0, this.p1ph) * 0.16;
-      v += this.pulse(1, this.p2ph) * 0.16;
-      if (nEnable && nVol) {
+      v += this.pulse(0, this.p1ph) * MIX_P1;
+      v += this.pulse(1, this.p2ph) * MIX_P2;
+
+      if (triOn) {
+        v += TRI_SEQ[(this.triPh | 0) & 31] * MIX_TRI;
+      }
+
+      if (noiseOn) {
         this.nAcc += nStep;
         while (this.nAcc >= 1) {
           this.nAcc -= 1;
           const fb = (this.lfsr ^ (this.lfsr >> 1)) & 1;
           this.lfsr = (this.lfsr >> 1) | (fb << 14);
         }
-        v += ((this.lfsr & 1) ? 1 : -1) * nVol * 0.12;
+        v += ((this.lfsr & 1) ? 1 : -1) * nVol * MIX_NSE;
       }
+
       this.p1ph += f1; if (this.p1ph > 1e6) this.p1ph = 0;
       this.p2ph += f2; if (this.p2ph > 1e6) this.p2ph = 0;
+      this.triPh += fT * 32; if (this.triPh > 1e9) this.triPh = this.triPh % 32;
+
+      v *= MASTER;
+      // gentle soft-clip: cubic limiter past ±0.9 to avoid hard-edge buzz
+      if (v > 0.9) v = 0.9 + (v - 0.9) / (1 + (v - 0.9) * 3);
+      else if (v < -0.9) v = -0.9 + (v + 0.9) / (1 - (v + 0.9) * 3);
       buf[s] = v > 1 ? 1 : v < -1 ? -1 : v;
     }
   }
@@ -552,6 +599,9 @@ class NES {
   setButton(bit, down) {
     if (down) this.pad |= (1 << bit); else this.pad &= ~(1 << bit);
   }
+
+  // Host hook: read a byte of 2KB work RAM (mirrored) for game-state inspection.
+  peekRAM(addr) { return this.ram[addr & 0x7FF]; }
 }
 
 if (typeof module !== 'undefined') module.exports = { NES };

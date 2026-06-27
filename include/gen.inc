@@ -27,7 +27,7 @@ _GEN_ = 1
     TILE_COACH10 = $4d
     TILE_COACH01 = $4e
     TILE_COACH11 = $4f
-    MAX_CARS = 4
+    MAX_CARS = 5
     CAR_W = 18
 .endscope
 .endif

@@ -647,7 +647,7 @@ with open(f"{ROOT}/include/gen.inc", "w") as f:
     f.write(f"    TILE_COACH10 = ${tile_name['coach_1_0']:02x}\n")
     f.write(f"    TILE_COACH01 = ${tile_name['coach_0_1']:02x}\n")
     f.write(f"    TILE_COACH11 = ${tile_name['coach_1_1']:02x}\n")
-    f.write(f"    MAX_CARS = 4\n")
+    f.write(f"    MAX_CARS = 5\n")
     f.write(f"    CAR_W = 18\n")
     f.write(".endscope\n.endif\n")
 
