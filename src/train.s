@@ -3,6 +3,7 @@
 .include "nmi.inc"
 .include "input.inc"
 .include "sfx.inc"
+.include "level.inc"
 .include "gen.inc"
 
 .import rbaTrainBody
@@ -85,6 +86,8 @@ arrivals: .res 1     ; count of station arrivals (exported to $0705)
 zMod:     .res 1     ; per-frame coach rotation offset (multiplexing)
 zCoach:   .res 1     ; logical coach index during slot fill
 cptr:     .res 2     ; dest pointer for a coach metasprite (PPU1 OAM)
+curBiome: .res 1     ; current biome/location index (exported to $0706)
+prevUp:   .res 1     ; previous Up-button state (whistle edge detect)
 
 .segment "RODATA"
 ; day -> noon -> sunset -> dusk -> night -> deep -> dawn -> morning
@@ -116,13 +119,14 @@ clr:
     sta todcH
     sta carCount
     sta arrivals
+    sta curBiome
+    sta prevUp
     lda #1
     sta carDir
     sta accelCtr
     lda #DWELL_TIME
     sta dwell
-    lda skyTable
-    sta Nmi::zbSkyColor
+    ; sky backdrop is set by Level::load_biome (called from level init)
 
     jsr Sfx::sfx_init
     jsr draw_all
@@ -132,6 +136,17 @@ clr:
 ; =============================================================================
 .proc update
     jsr Input::read_joypad1
+
+    ; manual whistle: toot on a fresh Up press (rising edge)
+    lda Input::rzbJoypad1
+    and #Input::JOYPAD_UP
+    tay                      ; Y = current Up state (0 or 8)
+    beq whistle_done
+    lda prevUp
+    bne whistle_done         ; was already held
+    jsr Sfx::sfx_whistle
+whistle_done:
+    sty prevUp
 
     lda mode
     bne do_run
@@ -298,6 +313,16 @@ no_hiss:
     inc arrivals            ; arrived at a station
     jsr Sfx::sfx_bell       ; ding at the station
 
+    ; advance to the next biome/location and swap the world in.
+    inc curBiome
+    lda curBiome
+    cmp #Gen::BIOME_COUNT
+    bcc biome_ok
+    lda #0
+    sta curBiome
+biome_ok:
+    jsr swap_biome
+
     ; couple/uncouple one car: ramp 0..MAX..0 so each leg has a different mass.
     lda carCount
     clc
@@ -316,6 +341,33 @@ chk_zero:
     lda #1                 ; empty -> start adding cars
     sta carDir
 done:
+    rts
+.endproc
+
+; rewrite the world for curBiome. Disables NMI + rendering during the heavy
+; VRAM rewrite (one blank frame), then restores them from the shadows.
+.proc swap_biome
+    lda Ppu::zbCtrl
+    and #<~Ppu::CTRL_V
+    sta Ppu::CTRL            ; NMI off (leave shadow intact)
+    lda Ppu::zbCtrl2
+    and #<~Ppu::CTRL_V
+    sta Ppu::CTRL2
+    lda #0
+    sta Ppu::MASK           ; rendering off
+    sta Ppu::MASK2
+
+    lda curBiome
+    jsr Level::load_biome
+
+    lda Ppu::rzbMask
+    sta Ppu::MASK           ; rendering back on
+    lda Ppu::rzbMask2
+    sta Ppu::MASK2
+    lda Ppu::zbCtrl
+    sta Ppu::CTRL           ; NMI back on
+    lda Ppu::zbCtrl2
+    sta Ppu::CTRL2
     rts
 .endproc
 
@@ -386,19 +438,6 @@ t1:
 
 ; =============================================================================
 .proc draw_all
-    ; advance time-of-day and push the backdrop colour for the NMI to apply.
-    inc todcL
-    bne tod
-    inc todcH
-tod:
-    lda todcH
-    lsr
-    lsr
-    and #7
-    tax
-    lda skyTable, x
-    sta Nmi::zbSkyColor
-
     ; smoke clock advances faster with speed (idle still wisps).
     lda spd
     lsr
@@ -456,6 +495,8 @@ no_bob:
     sta $0704
     lda arrivals
     sta $0705
+    lda curBiome
+    sta $0706
     rts
 .endproc
 

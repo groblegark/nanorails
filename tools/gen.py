@@ -384,6 +384,126 @@ coach.rect(6, 15, 10, 16, 2)        # coupler nub
 for tx, ty, rows, empty in coach.slice_tiles():
     add_tile(f"coach_{tx//8}_{ty//8}", rows)
 
+# ============================================================================
+# BIOME FRAMEWORK
+# Each leg of the journey is a different biome/location. The ROM swaps the
+# nametables + palette at every station. A biome = a name, a sky colour, 4 BG
+# sub-palettes, and a build(near,nearp,far,farp,rng) painter. Built-ins below;
+# art agents drop more into tools/biomes/*.py via the same API.
+# ============================================================================
+WIDTH = 64
+ROWS = 30
+GROUND_TOP = 24
+SKY = 0x22
+T = tile_name
+BIOMES = []   # {name, sky, pal(4x4 BG), build}
+
+def new_grid(): return [[0]*WIDTH for _ in range(ROWS)]
+def new_pal():  return [[0]*WIDTH for _ in range(ROWS)]
+
+def make_rng(seed):
+    s = seed
+    def nxt():
+        nonlocal s
+        s = (1103515245*s + 12345) & 0x7fffffff
+        return s
+    return nxt
+
+def stamp(grid, palg, prefix, ox, oy, tw, th, pal):
+    for ty in range(th):
+        for tx in range(tw):
+            key = f"{prefix}_{tx}_{ty}"
+            if key in T:
+                gx, gy = ox+tx, oy+ty
+                if 0 <= gx < WIDTH and 0 <= gy < ROWS:
+                    grid[gy][gx] = T[key]; palg[gy][gx] = pal
+
+def fill_ground(grid, palg, pal, rail="rail", top="grass_top", fill="grass_fill"):
+    for cy in range(GROUND_TOP, ROWS):
+        for cx in range(WIDTH):
+            t = rail if cy == GROUND_TOP else (top if cy == GROUND_TOP+1 else fill)
+            grid[cy][cx] = T[t]; palg[cy][cx] = pal
+
+def place_depots(grid, palg, pal=2):
+    # a depot where the train halts (col 13 of each 32-wide screen) + platform + sign
+    for base in (0, 32):
+        dl = base + 11
+        stamp(grid, palg, "depot", dl, 20, 5, 4, pal)
+        for px in (dl-2, dl-1, dl+5, dl+6):
+            if 0 <= px < WIDTH: grid[23][px] = T["platform"]; palg[23][px] = pal
+        stamp(grid, palg, "sign", dl-3, 21, 1, 3, pal)
+
+def scatter(grid, palg, items, rng):
+    """items: list of (prefix, tw, th, pal). Place avoiding the depot columns."""
+    busy = set()
+    for base in (0, 32):
+        for c in range(base+8, base+18): busy.add(c)   # keep clear of depots
+    x = 2
+    while x < WIDTH-2:
+        if all((x+i) not in busy for i in range(3)):
+            pre, tw, th, pal = items[rng() % len(items)]
+            stamp(grid, palg, pre, x, GROUND_TOP-th+1, tw, th, pal)
+            x += tw + 2 + (rng() % 3)
+        else:
+            x += 1
+
+def far_silhouette(grid, palg, rng, pal, top_tiles, mid_tile, base=24, minh=4, maxh=11):
+    x = 0
+    while x < WIDTH:
+        bw = 2 + (rng() % 4)
+        bh = minh + (rng() % max(1, maxh-minh))
+        top = base - bh
+        style = rng() % len(top_tiles)
+        for cx in range(x, min(WIDTH, x+bw)):
+            for cy in range(top, base):
+                grid[cy][cx] = T[top_tiles[style]] if cy == top else T[mid_tile]
+                palg[cy][cx] = pal
+        x += bw + (rng() % 2)
+
+def add_biome(name, sky, pal, build):
+    BIOMES.append({"name": name, "sky": sky, "pal": pal, "build": build})
+
+# ---- biome-specific tiles (kept lean; agents may add their own) ----
+add_tile("pine", [  # far conifer (palette c1 body, c2 shade)
+    "00011000","00111100","00111100","01111110","11111111","00111100","01111110","00011000",
+])
+add_tile("hill", [  # rolling hill top
+    "00000000","00000000","00001110","00111111","01111111","11111111","11111111","11111111",
+])
+
+# ---- built-in biomes -------------------------------------------------------
+def build_downtown(near, nearp, far, farp, rng):
+    fill_ground(near, nearp, 1)
+    place_depots(near, nearp, 2)
+    scatter(near, nearp, [("tree",2,3,1),("house",3,3,2),("lamp",1,3,2),("tree",2,3,1)], rng)
+    far_silhouette(far, farp, rng, 3, ["fb_top","fb_top_b"], "fb_mid", maxh=11)
+
+def build_night(near, nearp, far, farp, rng):
+    fill_ground(near, nearp, 1)
+    place_depots(near, nearp, 2)
+    scatter(near, nearp, [("house",3,3,2),("lamp",1,3,2),("tree",2,3,1),("lamp",1,3,2)], rng)
+    far_silhouette(far, farp, rng, 3, ["fb_top","fb_top_b"], "fb_mid", maxh=12)
+
+def build_forest(near, nearp, far, farp, rng):
+    fill_ground(near, nearp, 1)
+    place_depots(near, nearp, 2)
+    scatter(near, nearp, [("tree",2,3,1),("tree",2,3,1),("lamp",1,3,2),("tree",2,3,1)], rng)
+    far_silhouette(far, farp, rng, 3, ["pine"], "pine", base=24, minh=3, maxh=8)
+
+GRASS = lambda: [SKY, 0x1A, 0x0A, 0x17]
+add_biome("Central",        0x22, [[0x22,0x20,0x10,0x00], GRASS(), [0x22,0x16,0x0F,0x28], [0x22,0x2C,0x1C,0x30]], build_downtown)
+add_biome("Pinewood",       0x21, [[0x21,0x20,0x10,0x00], [0x21,0x1A,0x0A,0x17], [0x21,0x17,0x07,0x28], [0x21,0x0A,0x1A,0x2A]], build_forest)
+add_biome("Midnight Yards", 0x0F, [[0x0F,0x10,0x00,0x20], [0x0F,0x0A,0x09,0x07], [0x0F,0x06,0x0F,0x28], [0x0F,0x01,0x0C,0x28]], build_night)
+
+# ---- load art-agent biomes from tools/biomes/*.py --------------------------
+import glob as _glob
+_api = dict(T=T, tiles=tiles, add_tile=add_tile, define_tile=add_tile, Canvas=Canvas,
+            add_biome=add_biome, new_grid=new_grid, new_pal=new_pal, make_rng=make_rng,
+            stamp=stamp, fill_ground=fill_ground, place_depots=place_depots, scatter=scatter,
+            far_silhouette=far_silhouette, WIDTH=WIDTH, ROWS=ROWS, GROUND_TOP=GROUND_TOP, SKY=SKY)
+for _bf in sorted(_glob.glob(f"{ROOT}/tools/biomes/*.py")):
+    exec(open(_bf).read(), dict(_api))
+
 assert len(tiles) <= 256, f"too many tiles: {len(tiles)}"
 
 # ============================================================================
@@ -416,13 +536,6 @@ with open(f"{ROOT}/binclude/background.chr", "wb") as f:
 # ============================================================================
 # palette.s
 # ============================================================================
-SKY = 0x22
-bg_palettes = [
-    [SKY, 0x20, 0x10, 0x00],    # 0 sky / clouds
-    [SKY, 0x1A, 0x0A, 0x17],    # 1 ground: grass, dark green, brown
-    [SKY, 0x16, 0x0F, 0x28],    # 2 near houses: brick red, black, window yellow
-    [SKY, 0x2C, 0x1C, 0x30],    # 3 far skyline: light cyan, cyan, white-ish
-]
 spr_palettes = [
     [SKY, 0x16, 0x0F, 0x28],    # 0 train body: red, black, brass
     [SKY, 0x00, 0x0F, 0x10],    # 1 wheels/metal: gray, black, light gray
@@ -430,37 +543,33 @@ spr_palettes = [
     [SKY, 0x2A, 0x28, 0x16],    # 3 gauge: green (lit), yellow, red
 ]
 
-def emit_pal(f):
+# palette.s only writes the SPRITE palette ($3F10) at init; the BG palette
+# ($3F00) is written per-biome by Level::load_biome.
+with open(f"{ROOT}/src/palette.s", "w") as f:
     f.write("; AUTO-GENERATED by tools/gen.py\n")
-    f.write('.include "ppu.inc"\n\n.export palette\n\n.segment "RODATA"\n\naPalettes:\n')
-    for grp, pals in (("background", bg_palettes), ("sprite", spr_palettes)):
-        f.write(f"a{grp.capitalize()}:\n")
-        for p in pals:
-            f.write(".byte " + ",".join(f"${c:02x}" for c in p) + "\n")
-        f.write("\n")
-    f.write(""".segment "CODE"
-
+    f.write('.include "ppu.inc"\n\n.export palette\n\n.segment "RODATA"\n\naSpritePal:\n')
+    for p in spr_palettes:
+        f.write(".byte " + ",".join(f"${c:02x}" for c in p) + "\n")
+    f.write('''
+.segment "CODE"
 .proc palette
-    lda #>Ppu::BACKGROUND_PALETTE
+    lda #>Ppu::SPRITE_PALETTE
     sta Ppu::ADDR
     sta Ppu::ADDR2
-    lda #<Ppu::BACKGROUND_PALETTE
+    lda #<Ppu::SPRITE_PALETTE
     sta Ppu::ADDR
     sta Ppu::ADDR2
     ldx #0
 loop:
-    lda aPalettes, x
+    lda aSpritePal, x
     sta Ppu::DATA
     sta Ppu::DATA2
     inx
-    cpx #32
+    cpx #16
     bne loop
     rts
 .endproc
-""")
-
-with open(f"{ROOT}/src/palette.s", "w") as f:
-    emit_pal(f)
+''')
 
 # ============================================================================
 # NAMETABLES  (64 tiles wide world = 2 nametables of 32; wraps seamlessly)
@@ -593,13 +702,34 @@ def emit_nt(f, label, grid, palg):
         ab = attr_bytes(sub)
         f.write(".byte " + ",".join(f"${v:02x}" for v in ab) + "\n")
 
+# build every biome's two-screen world
+_built = []
+for _i, _b in enumerate(BIOMES):
+    n = new_grid(); npg = new_pal(); fr = new_grid(); frp = new_pal()
+    _b["build"](n, npg, fr, frp, make_rng(0x1234 + _i*101))
+    _built.append((n, npg, fr, frp))
+BIOME_COUNT = len(_built)
+
 with open(f"{ROOT}/src/leveldata.s", "w") as f:
     f.write("; AUTO-GENERATED by tools/gen.py\n\n")
-    f.write(".export rbaNear\n.export rbaFar\n\n")
+    f.write(".export rbaNearLo\n.export rbaNearHi\n.export rbaFarLo\n.export rbaFarHi\n.export aBiomePal\n\n")
     f.write('.segment "RODATA"\n\n')
-    emit_nt(f, "rbaNear", near, nearp)
-    f.write("\n")
-    emit_nt(f, "rbaFar", far, farp)
+    for _i, (n, npg, fr, frp) in enumerate(_built):
+        emit_nt(f, f"rbaNear{_i}", n, npg); f.write("\n")
+        emit_nt(f, f"rbaFar{_i}", fr, frp); f.write("\n")
+    f.write("rbaNearLo:\n.byte " + ",".join(f"<rbaNear{i}" for i in range(BIOME_COUNT)) + "\n")
+    f.write("rbaNearHi:\n.byte " + ",".join(f">rbaNear{i}" for i in range(BIOME_COUNT)) + "\n")
+    f.write("rbaFarLo:\n.byte " + ",".join(f"<rbaFar{i}" for i in range(BIOME_COUNT)) + "\n")
+    f.write("rbaFarHi:\n.byte " + ",".join(f">rbaFar{i}" for i in range(BIOME_COUNT)) + "\n")
+    f.write("aBiomePal:\n")
+    for _b in BIOMES:
+        for sub in _b["pal"]:
+            f.write(".byte " + ",".join(f"${c:02x}" for c in sub) + "\n")
+
+# biome names -> web route map
+import json as _json
+with open(f"{ROOT}/web/biomes.js", "w") as f:
+    f.write("window.NANOBIOMES=" + _json.dumps([b["name"] for b in BIOMES]) + ";\n")
 
 # ============================================================================
 # traindata.s  -- locomotive body metasprite + gen.inc constants
@@ -649,6 +779,7 @@ with open(f"{ROOT}/include/gen.inc", "w") as f:
     f.write(f"    TILE_COACH11 = ${tile_name['coach_1_1']:02x}\n")
     f.write(f"    MAX_CARS = 5\n")
     f.write(f"    CAR_W = 18\n")
+    f.write(f"    BIOME_COUNT = {BIOME_COUNT}\n")
     f.write(".endscope\n.endif\n")
 
 print(f"tiles used: {len(tiles)} / 256")

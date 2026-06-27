@@ -29,5 +29,6 @@ _GEN_ = 1
     TILE_COACH11 = $4f
     MAX_CARS = 5
     CAR_W = 18
+    BIOME_COUNT = 3
 .endscope
 .endif

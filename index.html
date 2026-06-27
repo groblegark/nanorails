@@ -10,7 +10,7 @@
 <meta property="og:description" content="A tiny self-driving train on a dual-PPU NES — playable in your browser.">
 <meta name="theme-color" content="#0c0f16">
 <meta name="color-scheme" content="dark">
-<link rel="stylesheet" href="style.css?v=2">
+<link rel="stylesheet" href="style.css?v=3">
 </head>
 <body>
 
@@ -86,12 +86,14 @@
   <!-- route display, integrated in the console -->
   <div class="route">
     <div class="head">ROUTE</div>
-    <div class="rail"></div>
-    <div class="stn origin" id="stnOrigin"></div>
-    <div class="stn dest" id="stnDest"></div>
-    <div class="lab o">Maple St</div>
-    <div class="lab d">Oak Park</div>
-    <div class="train" id="mapTrain">🚂</div>
+    <div class="chain" id="routeChain"></div>
+  </div>
+
+  <!-- visible train controls -->
+  <div class="controls">
+    <button class="ctl brake" id="ctlBrake"><span class="k">◀</span> Brake</button>
+    <button class="ctl whistle" id="ctlWhistle">Whistle</button>
+    <button class="ctl throttle" id="ctlThrottle">Throttle <span class="k">▶</span></button>
   </div>
 </div>
 
@@ -110,6 +112,7 @@
 
 <script src="nes.js"></script>
 <script src="rom.js"></script>
+<script src="biomes.js"></script>
 <script src="game.js"></script>
 <script>
 (function () {
@@ -125,12 +128,39 @@
     el: {
       money: $('hudMoney'), cars: $('hudCars'), upgrades: $('hudUpg'),
       fuelBar: $('fuelBar'), fuelTxt: $('fuelTxt'), fuelWrap: $('fuelWrap'), outOfFuel: $('outOfFuel'),
-      train: $('mapTrain'), dest: $('stnDest'), origin: $('stnOrigin'),
       shopMoney: $('shopMoney'), refuelBtn: $('refuelBtn'), refuelDesc: $('refuelDesc'),
       tankBtn: $('tankBtn'), tankDesc: $('tankDesc')
     },
     onAudioVolume: v => { if (gainNode) gainNode.gain.value = v; }
   });
+
+  // ---- route map: the chain of locations (biomes), current one highlighted ----
+  const STOPS = (window.NANOBIOMES && window.NANOBIOMES.length) ? window.NANOBIOMES : ['Route'];
+  const LEG_LEN = 85 * 256;
+  const chainEl = $('routeChain');
+  let dotEls = [], labEls = [], trainEl = null;
+  (function buildChain() {
+    const n = STOPS.length;
+    STOPS.forEach((name, i) => {
+      const left = n > 1 ? (i / (n - 1) * 100) : 50;
+      const d = document.createElement('div'); d.className = 'cstn'; d.style.left = left + '%';
+      const l = document.createElement('div'); l.className = 'clab'; l.style.left = left + '%'; l.textContent = name;
+      chainEl.appendChild(d); chainEl.appendChild(l); dotEls.push(d); labEls.push(l);
+    });
+    trainEl = document.createElement('div'); trainEl.className = 'ctrain'; trainEl.textContent = '🚂';
+    chainEl.appendChild(trainEl);
+  })();
+  function renderMap() {
+    const n = STOPS.length;
+    const cur = machine.peekRAM(0x706) % n;
+    const frac = Math.max(0, Math.min(1, game.legProgress / LEG_LEN));
+    for (let i = 0; i < n; i++) {
+      dotEls[i].classList.toggle('active', i === cur);
+      labEls[i].classList.toggle('active', i === cur);
+    }
+    const pos = n > 1 ? ((cur + frac) / (n - 1)) * 100 : 50;
+    trainEl.style.left = Math.min(100, pos) + '%';
+  }
 
   let running = false, paused = false;
   const ovTitle = $('ovTitle'), ovPause = $('ovPause'), ovShop = $('ovShop');
@@ -165,6 +195,7 @@
     else acc = 0;
     if (ran) { img.data.set(machine.out); ctx.putImageData(img, 0, 0); }
     game.maybeRenderHud(now);
+    renderMap();
     if (running && !paused && game.outOfFuel) { paused = true; openShop(); }
   }
 
@@ -189,6 +220,21 @@
   const doReset = () => { game.resetSave(); game.renderHud(); game.renderShop(); updateMute(); };
   $('btnResetTitle').onclick = doReset;
   $('btnResetPause').onclick = doReset;
+
+  // visible train controls (hold throttle/brake; tap whistle)
+  function holdBtn(el, bit) {
+    const dn = e => { e.preventDefault(); machine.setButton(bit, true); el.classList.add('on'); };
+    const up = () => { machine.setButton(bit, false); el.classList.remove('on'); };
+    el.addEventListener('pointerdown', dn);
+    ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => el.addEventListener(ev, up));
+  }
+  holdBtn($('ctlThrottle'), 7);
+  holdBtn($('ctlBrake'), 6);
+  $('ctlWhistle').addEventListener('pointerdown', e => {
+    e.preventDefault(); machine.setButton(4, true);
+    $('ctlWhistle').classList.add('on');
+    setTimeout(() => { machine.setButton(4, false); $('ctlWhistle').classList.remove('on'); }, 150);
+  });
 
   const map = { 'ArrowRight':7, 'ArrowLeft':6, 'ArrowUp':4, 'ArrowDown':5, 'KeyX':0, 'KeyZ':1, 'ShiftLeft':2, 'Enter':3 };
   addEventListener('keydown', e => {

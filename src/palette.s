@@ -5,35 +5,27 @@
 
 .segment "RODATA"
 
-aPalettes:
-aBackground:
-.byte $22,$20,$10,$00
-.byte $22,$1a,$0a,$17
-.byte $22,$16,$0f,$28
-.byte $22,$2c,$1c,$30
-
-aSprite:
+aSpritePal:
 .byte $22,$16,$0f,$28
 .byte $22,$00,$0f,$10
 .byte $22,$20,$10,$00
 .byte $22,$2a,$28,$16
 
 .segment "CODE"
-
 .proc palette
-    lda #>Ppu::BACKGROUND_PALETTE
+    lda #>Ppu::SPRITE_PALETTE
     sta Ppu::ADDR
     sta Ppu::ADDR2
-    lda #<Ppu::BACKGROUND_PALETTE
+    lda #<Ppu::SPRITE_PALETTE
     sta Ppu::ADDR
     sta Ppu::ADDR2
     ldx #0
 loop:
-    lda aPalettes, x
+    lda aSpritePal, x
     sta Ppu::DATA
     sta Ppu::DATA2
     inx
-    cpx #32
+    cpx #16
     bne loop
     rts
 .endproc
