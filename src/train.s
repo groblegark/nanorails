@@ -47,7 +47,8 @@ MIN_CREEP  = 8
 DWELL_TIME = 240        ; ~4s at the platform
 ; trip = 85 * 256 px ~= 2 minutes of cruising. odd multiple -> alternate depots.
 TRIP_HI    = 85
-CHUFF_GAP  = 12
+CHUFF_GAP  = 64        ; px between exhaust chuffs (~21 frames apart at cruise;
+                       ; must exceed CHUFF_LEN*pxStep or chuffs merge into a drone)
 THROTTLE   = Input::JOYPAD_A | Input::JOYPAD_RIGHT
 BRAKEBTN   = Input::JOYPAD_B | Input::JOYPAD_LEFT
 
