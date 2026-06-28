@@ -138,8 +138,9 @@ canvas{ display:block; width:100%; height:100%; image-rendering:pixelated; }
 .ctl.on{ transform:translateY(1px); }
 .ctl.throttle.on{ background:linear-gradient(180deg,#74e9ad,#46c489); color:#06281a; border-color:transparent; }
 .ctl.brake.on{ background:linear-gradient(180deg,#ff8a8a,#e25b5b); color:#2a0808; border-color:transparent; }
-.ctl.whistle{ flex:0 0 34%; }
+.ctl.whistle, .ctl.bell{ flex:0 0 22%; }
 .ctl.whistle.on{ background:linear-gradient(180deg,#ffe08a,#e8c25a); color:#2a2206; border-color:transparent; }
+.ctl.bell.on{ background:linear-gradient(180deg,#9fd8ff,#5aa8e8); color:#06223a; border-color:transparent; }
 
 /* ---------- footer hint / toolbar ---------- */
 .hint{ display:flex; align-items:center; justify-content:center; gap:14px;

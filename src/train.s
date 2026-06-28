@@ -89,6 +89,7 @@ zCoach:   .res 1     ; logical coach index during slot fill
 cptr:     .res 2     ; dest pointer for a coach metasprite (PPU1 OAM)
 curBiome: .res 1     ; current biome/location index (exported to $0706)
 prevUp:   .res 1     ; previous Up-button state (whistle edge detect)
+prevDown: .res 1     ; previous Down-button state (bell edge detect)
 
 .segment "RODATA"
 ; day -> noon -> sunset -> dusk -> night -> deep -> dawn -> morning
@@ -122,6 +123,7 @@ clr:
     sta arrivals
     sta curBiome
     sta prevUp
+    sta prevDown
     lda #1
     sta carDir
     sta accelCtr
@@ -148,6 +150,17 @@ clr:
     jsr Sfx::sfx_whistle
 whistle_done:
     sty prevUp
+
+    ; manual bell: ding on a fresh Down press (rising edge)
+    lda Input::rzbJoypad1
+    and #Input::JOYPAD_DOWN
+    tay                      ; Y = current Down state (0 or 4)
+    beq bell_done
+    lda prevDown
+    bne bell_done            ; was already held
+    jsr Sfx::sfx_bell
+bell_done:
+    sty prevDown
 
     lda mode
     bne do_run
