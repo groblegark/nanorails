@@ -13,8 +13,11 @@
 .export load_biome
 
 .segment "ZEROPAGE"
-zwPtr:   .res 2
-zbBiome: .res 1
+zwPtr:    .res 2
+zbBiome:  .res 1
+zwOutRem: .res 2    ; bytes left to emit while unpacking
+zbWhich:  .res 1    ; 0 = PPU1 DATA, 1 = PPU2 DATA2
+zbTmp:    .res 1
 
 .segment "CODE"
 
@@ -42,7 +45,9 @@ zbBiome: .res 1
     sta zwPtr
     lda rbaNearHi, x
     sta zwPtr+1
-    jsr copy_2k_ppu1
+    lda #0
+    sta zbWhich
+    jsr unpack
 
     ; --- far world -> PPU2 ---
     lda #>Ppu::NAMETABLE_0
@@ -54,7 +59,9 @@ zbBiome: .res 1
     sta zwPtr
     lda rbaFarHi, x
     sta zwPtr+1
-    jsr copy_2k_ppu2
+    lda #1
+    sta zbWhich
+    jsr unpack
 
     ; --- BG palette: src = aBiomePal + biome*16 ---
     lda zbBiome
@@ -91,31 +98,67 @@ pal_loop:
     rts
 .endproc
 
-.proc copy_2k_ppu1
-    ldx #8
+; read next source byte (zwPtr) into A, advance the 16-bit pointer. preserves X.
+.proc getb
     ldy #0
-loop:
     lda (zwPtr), y
-    sta Ppu::DATA
-    iny
-    bne loop
+    inc zwPtr
+    bne :+
     inc zwPtr+1
-    dex
-    bne loop
+:   rts
+.endproc
+
+; write A to the selected PPU data port and count one output byte. preserves X.
+.proc putb
+    ldy zbWhich
+    beq :+
+    sta Ppu::DATA2
+    jmp cnt
+:   sta Ppu::DATA
+cnt:
+    lda zwOutRem
+    bne :+
+    dec zwOutRem+1
+:   dec zwOutRem
     rts
 .endproc
 
-.proc copy_2k_ppu2
-    ldx #8
-    ldy #0
-loop:
-    lda (zwPtr), y
-    sta Ppu::DATA2
-    iny
-    bne loop
-    inc zwPtr+1
+; PackBits decode: zwPtr -> compressed stream, emit exactly 2048 bytes to the
+; PPU port chosen by zbWhich. (encoder: tools/gen.py packbits())
+.proc unpack
+    lda #<2048
+    sta zwOutRem
+    lda #>2048
+    sta zwOutRem+1
+ctl:
+    jsr getb                 ; control byte
+    cmp #$80
+    bcs run
+    ; literal run: copy A+1 source bytes
+    tax
+    inx
+lit:
+    jsr getb
+    jsr putb
     dex
-    bne loop
+    bne lit
+    jmp more
+run:
+    eor #$ff
+    clc
+    adc #2                   ; X = 257 - C  (run length 2..128)
+    tax
+    jsr getb                 ; byte to repeat
+    sta zbTmp
+rl:
+    lda zbTmp
+    jsr putb
+    dex
+    bne rl
+more:
+    lda zwOutRem
+    ora zwOutRem+1
+    bne ctl
     rts
 .endproc
 

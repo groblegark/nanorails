@@ -688,19 +688,42 @@ def attr_bytes(palg):
     assert len(out) == 64 or True
     return out[:64]
 
-def emit_nt(f, label, grid, palg):
-    """emit 2 nametables (left cols 0..31, right cols 32..63) = 2048 bytes."""
-    f.write(f"{label}:\n")
+def nt_bytes(grid, palg):
+    """raw 2048-byte two-screen nametable (left cols 0..31, right 32..63)."""
+    out = []
     for screen in range(2):
         c0 = screen*32
-        # 960 tile bytes
-        for row in range(ROWS):
-            vals = [grid[row][c0+c] for c in range(32)]
-            f.write(".byte " + ",".join(f"${v:02x}" for v in vals) + "\n")
-        # 64 attribute bytes for this screen
+        for row in range(ROWS):                       # 960 tile bytes
+            out += [grid[row][c0+c] for c in range(32)]
         sub = [[palg[row][c0+c] for c in range(32)] for row in range(ROWS)]
-        ab = attr_bytes(sub)
-        f.write(".byte " + ",".join(f"${v:02x}" for v in ab) + "\n")
+        out += attr_bytes(sub)                        # 64 attribute bytes
+    assert len(out) == 2048
+    return out
+
+def packbits(d):
+    """PackBits RLE -> bytes; decoded by Level::unpack in level.s (output-len driven)."""
+    out = bytearray(); i = 0; n = len(d)
+    while i < n:
+        run = 1
+        while i+run < n and run < 128 and d[i+run] == d[i]:
+            run += 1
+        if run >= 2:
+            out.append(257-run); out.append(d[i]); i += run
+        else:
+            j = i; lit = bytearray()
+            while j < n and len(lit) < 128:
+                if j+2 < n and d[j+1] == d[j] and d[j+2] == d[j]:
+                    break
+                lit.append(d[j]); j += 1
+            out.append(len(lit)-1); out.extend(lit); i = j
+    return out
+
+def emit_nt(f, label, grid, palg):
+    """emit a PackBits-compressed 2-screen nametable (decoded to 2048 bytes at load)."""
+    packed = packbits(nt_bytes(grid, palg))
+    f.write(f"{label}:\n")
+    for k in range(0, len(packed), 24):
+        f.write(".byte " + ",".join(f"${v:02x}" for v in packed[k:k+24]) + "\n")
 
 # build every biome's two-screen world
 _built = []
